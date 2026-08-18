@@ -20,6 +20,7 @@ from custom_components.securitas.verisure_owa_api.exceptions import (
     WAFBlockedError,
     _error_code_from_body,
     is_genuine_auth_failure,
+    is_refused_refresh,
 )
 
 # ── Subclass checks ───────────────────────────────────────────────────────────
@@ -225,6 +226,52 @@ class TestLogDetail:
 def _with_err_code(err: VerisureOwaError, code: str) -> VerisureOwaError:
     err.response_body = {"errors": [{"message": "x", "data": {"err": code}}]}
     return err
+
+
+class TestIsRefusedRefresh:
+    def test_null_refresh_result_is_a_refusal(self):
+        err = VerisureOwaError("Cannot read properties of undefined (reading 'br')")
+        err.response_body = {
+            "errors": [
+                {"message": "Cannot read properties of undefined (reading 'br')"}
+            ],
+            "data": {"xSRefreshLogin": None},
+        }
+        assert is_refused_refresh(err) is True
+
+    def test_a_refusal_stays_transient_on_its_own(self):
+        err = VerisureOwaError("Cannot read properties of undefined (reading 'br')")
+        err.response_body = {
+            "errors": [
+                {"message": "Cannot read properties of undefined (reading 'br')"}
+            ],
+            "data": {"xSRefreshLogin": None},
+        }
+        assert is_genuine_auth_failure(err) is False
+
+    def test_populated_refresh_result_is_not_a_refusal(self):
+        err = VerisureOwaError("something else")
+        err.response_body = {
+            "errors": [{"message": "something else"}],
+            "data": {"xSRefreshLogin": {"res": "KO"}},
+        }
+        assert is_refused_refresh(err) is False
+
+    def test_null_result_of_another_operation_is_not_a_refusal(self):
+        err = VerisureOwaError("Cannot read properties of undefined (reading 'br')")
+        err.response_body = {
+            "errors": [{"message": "boom"}],
+            "data": {"xSInstallations": None},
+        }
+        assert is_refused_refresh(err) is False
+
+    def test_no_errors_array_is_not_a_refusal(self):
+        err = VerisureOwaError("no errors")
+        err.response_body = {"data": {"xSRefreshLogin": None}}
+        assert is_refused_refresh(err) is False
+
+    def test_no_body_is_not_a_refusal(self):
+        assert is_refused_refresh(VerisureOwaError("bare")) is False
 
 
 class TestIsGenuineAuthFailure:

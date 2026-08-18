@@ -98,6 +98,7 @@ from .const import (  # noqa: F401 — re-exported for backwards compatibility
     DOMAIN,
     PANEL_OPTION_KEYS,
     PLATFORMS,
+    REFUSED_REFRESH_REAUTH_AFTER,
     SENTINEL_SERVICE_NAMES,
     SIGNAL_CAMERA_STATE,
 )
@@ -136,6 +137,7 @@ from .verisure_owa_api import (
     generate_device_id,
     generate_uuid,
 )
+from .verisure_owa_api.exceptions import is_refused_refresh
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -453,6 +455,23 @@ def _build_config_dict(entry: ConfigEntry) -> tuple[dict[str, Any], bool]:
     return config, need_sign_in
 
 
+def _refused_refresh_is_persistent(hass: HomeAssistant, username: str) -> bool:
+    """True when xSRefreshLogin has been refused for longer than the grace period.
+
+    A single refusal can still be a backend wobble, so the first failures retry.
+    Once they span REFUSED_REFRESH_REAUTH_AFTER the token is dead in practice:
+    a token-only account has no password to fall back on, so nothing but
+    reauthentication can bring the entry back.
+    """
+    refused_since = hass.data[DOMAIN].setdefault("refused_refresh_since", {})
+    first = refused_since.get(username)
+    now = time.monotonic()
+    if first is None:
+        refused_since[username] = now
+        return False
+    return now - first >= REFUSED_REFRESH_REAUTH_AFTER
+
+
 async def _get_or_create_session(
     hass: HomeAssistant, config: dict[str, Any], entry: ConfigEntry
 ) -> VerisureHub:
@@ -498,9 +517,19 @@ async def _get_or_create_session(
                     "Unable to connect to Verisure: %s",
                     err.log_detail(),
                 )
+                if is_refused_refresh(err) and _refused_refresh_is_persistent(
+                    hass, username
+                ):
+                    _notify(hass, "login_error", "login_failed", {"error": str(err)})
+                    raise ConfigEntryAuthFailed(
+                        "Refresh token refused for over "
+                        f"{REFUSED_REFRESH_REAUTH_AFTER // 60} minutes; "
+                        "reauthentication required"
+                    ) from None
                 raise ConfigEntryNotReady(
                     f"Unable to connect to Verisure: {err.message}"
                 ) from None
+            hass.data[DOMAIN].get("refused_refresh_since", {}).pop(username, None)
             sessions[username] = {"hub": client, "ref_count": 1}
 
     return client

@@ -38,6 +38,7 @@ from custom_components.securitas import (
     DOMAIN,
     PANEL_OPTION_KEYS,
     PLATFORMS,
+    REFUSED_REFRESH_REAUTH_AFTER,
     VerisureDevice,
     VerisureHub,
     _build_config_dict,
@@ -72,6 +73,24 @@ from tests.conftest import (
 # ---------------------------------------------------------------------------
 # Helper: patch VerisureHub preserving __name__
 # ---------------------------------------------------------------------------
+
+
+def _refused_refresh_error() -> VerisureOwaError:
+    """A refused refresh as the BR backend sends it: a crash, no vendor code."""
+    err = VerisureOwaError(
+        "xSRefreshLogin failed: Cannot read properties of undefined (reading 'br')"
+    )
+    err.response_body = {
+        "errors": [
+            {
+                "message": "Cannot read properties of undefined (reading 'br')",
+                "path": ["xSRefreshLogin"],
+                "data": {},
+            }
+        ],
+        "data": {"xSRefreshLogin": None},
+    }
+    return err
 
 
 def _patch_hub(mock_hub):
@@ -502,6 +521,74 @@ class TestAsyncSetupEntry:
             pytest.raises(ConfigEntryNotReady),
         ):
             await async_setup_entry(hass, entry)
+
+    async def test_setup_refused_refresh_retries_before_the_grace_period(
+        self, hass, mock_hub
+    ):
+        """A first refused refresh retries — it may still be a backend wobble."""
+        mock_hub.login = AsyncMock(side_effect=_refused_refresh_error())
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config_entry_data())
+        entry.add_to_hass(hass)
+
+        with (
+            _patch_hub(mock_hub),
+            patch("custom_components.securitas.async_get_clientsession"),
+            patch("custom_components.securitas.time.monotonic", return_value=1000.0),
+            pytest.raises(ConfigEntryNotReady),
+        ):
+            await async_setup_entry(hass, entry)
+
+    async def test_setup_refused_refresh_prompts_reauth_once_it_persists(
+        self, hass, mock_hub
+    ):
+        """Refusals spanning the grace period prompt reauth instead of retrying.
+
+        A token-only account has no password fallback, so an endless retry
+        leaves the entry down for ever with no way for the user to fix it.
+        """
+        mock_hub.login = AsyncMock(side_effect=_refused_refresh_error())
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config_entry_data())
+        entry.add_to_hass(hass)
+
+        with (
+            _patch_hub(mock_hub),
+            patch("custom_components.securitas.async_get_clientsession"),
+            patch("custom_components.securitas.time.monotonic", return_value=1000.0),
+            pytest.raises(ConfigEntryNotReady),
+        ):
+            await async_setup_entry(hass, entry)
+
+        with (
+            _patch_hub(mock_hub),
+            patch("custom_components.securitas.async_get_clientsession"),
+            patch(
+                "custom_components.securitas.time.monotonic",
+                return_value=1000.0 + REFUSED_REFRESH_REAUTH_AFTER,
+            ),
+            patch("custom_components.securitas._notify") as mock_notify,
+            pytest.raises(ConfigEntryAuthFailed, match="reauthentication required"),
+        ):
+            await async_setup_entry(hass, entry)
+
+        assert mock_notify.call_args[0][1] == "login_error"
+
+    async def test_setup_transient_error_never_prompts_reauth(self, hass, mock_hub):
+        """A transient error that is not a refused refresh keeps retrying."""
+        mock_hub.login = AsyncMock(side_effect=VerisureOwaError("boom"))
+        entry = MockConfigEntry(domain=DOMAIN, data=make_config_entry_data())
+        entry.add_to_hass(hass)
+
+        for elapsed in (0.0, REFUSED_REFRESH_REAUTH_AFTER * 10):
+            with (
+                _patch_hub(mock_hub),
+                patch("custom_components.securitas.async_get_clientsession"),
+                patch(
+                    "custom_components.securitas.time.monotonic",
+                    return_value=1000.0 + elapsed,
+                ),
+                pytest.raises(ConfigEntryNotReady),
+            ):
+                await async_setup_entry(hass, entry)
 
     async def test_setup_login_error_does_not_leak_response_body(self, hass, mock_hub):
         """User-facing ConfigEntryNotReady must not embed raw response body.

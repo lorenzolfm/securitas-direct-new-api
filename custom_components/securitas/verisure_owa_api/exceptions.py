@@ -156,6 +156,25 @@ def _error_code(err: VerisureOwaError) -> str | None:
     return _error_code_from_body(err.response_body)
 
 
+def is_refused_refresh(err: VerisureOwaError) -> bool:
+    """True when the server answered xSRefreshLogin with a null result.
+
+    The refusal carries no vendor ``err`` code: the BR backend crashes while it
+    localises the message (``Cannot read properties of undefined (reading
+    'br')`` -- the quoted key follows the requested ``lang``), so the null
+    result is the only signal left. One such answer is still not proof of a
+    dead token, so this stays out of is_genuine_auth_failure(); the setup path
+    escalates only after the refusals persist.
+    """
+    body = err.response_body
+    if not isinstance(body, dict) or not body.get("errors"):
+        return False
+    data = body.get("data")
+    if not isinstance(data, dict) or "xSRefreshLogin" not in data:
+        return False
+    return data["xSRefreshLogin"] is None
+
+
 def is_genuine_auth_failure(err: VerisureOwaError) -> bool:
     """True only for failures that genuinely require re-authentication.
 
